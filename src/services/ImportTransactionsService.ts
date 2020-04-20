@@ -1,4 +1,4 @@
-import { getRepository, getCustomRepository, getConnection } from 'typeorm';
+import { getRepository, getCustomRepository, In } from 'typeorm';
 import parseCSV from 'csv-parse';
 import path from 'path';
 import fs from 'fs';
@@ -41,45 +41,54 @@ class ImportTransactionsService {
 
     await new Promise(resolve => parsedCSV.on('end', resolve));
 
+    // Removendo categorias repetidas
     const categories = transactionsTmp
       .map(transactionTmp => transactionTmp.category)
       .filter((element, position, thisArray) => {
         return thisArray.indexOf(element) === position;
-      })
-      .map(category => categoriesRepository.create({ title: category }));
-
-    await getConnection()
-      .createQueryBuilder()
-      .insert()
-      .into(Category)
-      .values(categories)
-      .execute();
-
-    const transactions = transactionsTmp.map(transaction => {
-      const category_id = categories.find(
-        category => category.title === transaction.category,
-      )?.id;
-
-      const { title, type, value } = transaction;
-
-      return transactionsRepository.create({
-        title,
-        type,
-        value,
-        category_id,
       });
+
+    /**
+     * Buscando categorias que já existem no banco de dados
+     */
+    const existentCategories = await categoriesRepository.find({
+      where: {
+        title: In(categories),
+      },
     });
 
-    await getConnection()
-      .createQueryBuilder()
-      .insert()
-      .into(Transaction)
-      .values(transactions)
-      .execute();
+    // Criando array contendo apenas os títulos das categorias
+    const categoryTitles = existentCategories.map(category => category.title);
+
+    // Removendo categorias que já estão criadas
+    const categoriesToAdd = categories.filter(
+      category => !categoryTitles.includes(category),
+    );
+
+    const newCategories = categoriesRepository.create(
+      categoriesToAdd.map(title => ({
+        title,
+      })),
+    );
+
+    await categoriesRepository.save(newCategories);
+
+    const finalCategories = [...newCategories, ...existentCategories];
+
+    const createdTransactions = transactionsRepository.create(
+      transactionsTmp.map(transaction => ({
+        ...transaction,
+        category: finalCategories.find(
+          category => transaction.category === category.title,
+        ),
+      })),
+    );
+
+    await transactionsRepository.save(createdTransactions);
 
     fs.promises.unlink(filePath);
 
-    return transactions;
+    return createdTransactions;
   }
 }
 
